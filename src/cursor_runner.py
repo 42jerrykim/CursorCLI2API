@@ -85,15 +85,22 @@ async def run_agent(
     if force:
         args.append("--force")
     args.append(prompt)
+    # When cwd is None, subprocess uses the server's CWD (often the project dir). Cursor agent
+    # may then index the project, which can add 30+ seconds before the first "thinking" event.
+    run_cwd = cwd or os.getcwd()
     t0 = asyncio.get_event_loop().time()
-    logger.info("[cursor_runner] spawning agent args=%s", args[:4] + ["..."] if len(args) > 4 else args)
+    logger.info(
+        "[cursor_runner] spawning agent cwd=%s args=%s",
+        run_cwd,
+        args[:4] + ["..."] if len(args) > 4 else args,
+    )
 
     try:
         proc = await asyncio.create_subprocess_exec(
             *args,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            cwd=cwd,
+            cwd=run_cwd,
         )
         logger.info("[cursor_runner] subprocess started pid=%s", proc.pid)
     except FileNotFoundError:
