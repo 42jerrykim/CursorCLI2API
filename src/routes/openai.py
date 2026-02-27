@@ -21,6 +21,10 @@ from src.cursor_runner import check_agent_available
 router = APIRouter(prefix="/v1", tags=["openai"])
 
 
+# Advertised context/output limit so clients use this instead of defaulting to 4096
+CURSOR_AGENT_MAX_TOKENS = 200_000
+
+
 @router.get("/models")
 async def list_models() -> dict:
     """Return list of available models (OpenAI-compatible)."""
@@ -32,6 +36,9 @@ async def list_models() -> dict:
                 "object": "model",
                 "created": 0,
                 "owned_by": "cursor-cli",
+                "max_tokens": CURSOR_AGENT_MAX_TOKENS,
+                "context_length": CURSOR_AGENT_MAX_TOKENS,
+                "context_window": CURSOR_AGENT_MAX_TOKENS,
             }
         ],
     }
