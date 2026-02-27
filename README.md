@@ -43,7 +43,29 @@ python -m src.main
 ## 테스트
 
 - **자동 테스트** (Cursor CLI 없이 mock으로 실행): 프로젝트 루트에서 `pytest tests/ -v`
-- **수동 검증**: 서버 실행 후 `python scripts/test_client.py` (기본: 스트리밍). `python scripts/test_client.py --no-stream --prompt "Hello"` 로 비스트리밍/프롬프트 지정 가능.
+- **수동 검증**: 서버 실행 후 `python scripts/test_client.py --prompt "Hello"` (기본: 스트리밍). `python scripts/test_client.py --no-stream --prompt "Hello"` 로 비스트리밍/프롬프트 지정 가능.
+
+```powershell
+PS > python scripts/test_client.py --prompt "Hello"        
+GET http://127.0.0.1:8080/v1/models
+Models: {
+  "object": "list",
+  "data": [
+    {
+      "id": "cursor-agent",
+      "object": "model",
+      "created": 0,
+      "owned_by": "cursor-cli"
+    }
+  ]
+}
+
+POST http://127.0.0.1:8080/v1/chat/completions (stream=True)
+Content:
+Waiting for response...
+
+Hello. How can I help you today with your CursorCLI2API project or anything else?
+```
 
 ## API
 
