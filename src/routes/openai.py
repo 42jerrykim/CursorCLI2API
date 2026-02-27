@@ -1,11 +1,15 @@
 """OpenAI-compatible API routes."""
+import asyncio
 import json
+import logging
 import time
 import uuid
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
+
+logger = logging.getLogger(__name__)
 
 from src.adapters.stream_adapter import (
     OPENAI_MODEL_ID,
@@ -60,6 +64,8 @@ async def create_chat_completion(body: dict) -> Any:
 
     try:
         if stream:
+            prompt_preview = (messages[0].get("content") or "")[:80] if messages else ""
+            logger.info("chat/completions stream request start prompt=%r", prompt_preview)
             return StreamingResponse(
                 _sse_stream(messages, force=force),
                 media_type="text/event-stream",
@@ -88,15 +94,48 @@ def _empty_delta_chunk():
     }
 
 
+SSE_KEEPALIVE_INTERVAL = 20.0  # seconds; send comment so client read timeout doesn't fire
+
+
 async def _sse_stream(messages: list[dict], force: bool | None = None):
-    """Generate SSE lines from stream_completion chunks."""
-    # Send one empty-delta chunk immediately so the client sees the stream has started
+    """Generate SSE lines from stream_completion chunks. Sends SSE keepalive comments
+    while waiting for the agent so clients with a per-read timeout don't disconnect."""
+    t0 = time.monotonic()
+    logger.info("[stream] t=%.2fs sending empty-delta (stream start)", time.monotonic() - t0)
     yield f"data: {json.dumps(_empty_delta_chunk(), ensure_ascii=False)}\n\n"
-    try:
-        async for chunk in stream_completion(messages, force=force):
-            line = json.dumps(chunk, ensure_ascii=False)
-            yield f"data: {line}\n\n"
-        yield "data: [DONE]\n\n"
-    except (RuntimeError, TimeoutError) as e:
-        # Yield one error chunk so client gets a message before stream ends
-        yield f"data: {json.dumps({'error': {'message': str(e)}, 'object': 'error'}, ensure_ascii=False)}\n\n"
+    queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
+
+    async def consume():
+        try:
+            async for chunk in stream_completion(messages, force=force):
+                await queue.put(("chunk", chunk))
+            await queue.put(("done", None))
+        except (RuntimeError, TimeoutError) as e:
+            await queue.put(("error", e))
+
+    asyncio.create_task(consume())
+    chunk_count = 0
+    while True:
+        try:
+            kind, payload = await asyncio.wait_for(queue.get(), timeout=SSE_KEEPALIVE_INTERVAL)
+        except asyncio.TimeoutError:
+            elapsed = time.monotonic() - t0
+            logger.info("[stream] t=%.2fs keepalive (no agent output yet)", elapsed)
+            yield ": keepalive\n\n"
+            continue
+        if kind == "done":
+            break
+        if kind == "error":
+            elapsed = time.monotonic() - t0
+            logger.warning("[stream] t=%.2fs error: %s", elapsed, payload)
+            yield f"data: {json.dumps({'error': {'message': str(payload)}, 'object': 'error'}, ensure_ascii=False)}\n\n"
+            return
+        chunk_count += 1
+        delta_len = len((payload.get("choices") or [{}])[0].get("delta", {}).get("content") or "")
+        elapsed = time.monotonic() - t0
+        logger.info("[stream] t=%.2fs chunk #%d delta_len=%d", elapsed, chunk_count, delta_len)
+        line = json.dumps(payload, ensure_ascii=False)
+        yield f"data: {line}\n\n"
+    elapsed = time.monotonic() - t0
+    logger.info("[stream] t=%.2fs done total_chunks=%d", elapsed, chunk_count)
+    yield "data: [DONE]\n\n"

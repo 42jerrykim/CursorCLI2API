@@ -1,11 +1,14 @@
 """Run Cursor CLI agent as subprocess and parse NDJSON stdout."""
 import asyncio
 import json
+import logging
 import os
 import shutil
 import sys
 from pathlib import Path
 from typing import AsyncIterator
+
+logger = logging.getLogger(__name__)
 
 # Optional config (avoid circular import by lazy use in run_agent)
 def _get_config():
@@ -82,6 +85,8 @@ async def run_agent(
     if force:
         args.append("--force")
     args.append(prompt)
+    t0 = asyncio.get_event_loop().time()
+    logger.info("[cursor_runner] spawning agent args=%s", args[:4] + ["..."] if len(args) > 4 else args)
 
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -90,6 +95,7 @@ async def run_agent(
             stderr=asyncio.subprocess.PIPE,
             cwd=cwd,
         )
+        logger.info("[cursor_runner] subprocess started pid=%s", proc.pid)
     except FileNotFoundError:
         raise RuntimeError(
             f'Cursor agent "{cmd}" not found. '
@@ -100,12 +106,14 @@ async def run_agent(
         data = await proc.stderr.read()
         return data.decode("utf-8", errors="replace").strip()
 
+    line_count = 0
     try:
         if proc.stdout is None:
             err = await read_stderr()
             raise RuntimeError(f"agent failed: no stdout. stderr: {err}")
 
         buffer = b""
+        first_chunk = True
         while True:
             try:
                 if timeout is not None:
@@ -119,16 +127,23 @@ async def run_agent(
 
             if not chunk:
                 break
+            if first_chunk:
+                elapsed = asyncio.get_event_loop().time() - t0
+                logger.info("[cursor_runner] t=%.2fs first stdout chunk received len=%d", elapsed, len(chunk))
+                first_chunk = False
             buffer += chunk
             while b"\n" in buffer:
                 line, buffer = buffer.split(b"\n", 1)
                 line = line.strip()
                 if not line:
                     continue
+                line_count += 1
                 try:
                     obj = json.loads(line.decode("utf-8"))
                 except (json.JSONDecodeError, UnicodeDecodeError) as e:
                     continue  # skip malformed lines
+                if line_count <= 2 or obj.get("type") in ("assistant", "result"):
+                    logger.info("[cursor_runner] t=%.2fs line #%d type=%s", asyncio.get_event_loop().time() - t0, line_count, obj.get("type", ""))
                 yield obj
 
         # drain remainder
@@ -146,6 +161,8 @@ async def run_agent(
                 pass
             await proc.wait()
 
+    elapsed = asyncio.get_event_loop().time() - t0
+    logger.info("[cursor_runner] t=%.2fs process exited returncode=%s lines_parsed=%d", elapsed, proc.returncode, line_count)
     if proc.returncode != 0:
         err = await read_stderr()
         raise RuntimeError(f"agent exited with code {proc.returncode}. stderr: {err}")

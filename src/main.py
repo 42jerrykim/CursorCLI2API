@@ -1,7 +1,12 @@
 """FastAPI app: OpenAI-compatible API over Cursor CLI."""
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+
+# Show INFO logs from src (routes, stream_adapter, cursor_runner) for debugging stream timing
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
+logging.getLogger("src").setLevel(logging.INFO)
 from fastapi.middleware.cors import CORSMiddleware
 
 from src.routes.openai import router as openai_router

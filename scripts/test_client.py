@@ -63,11 +63,14 @@ def main():
             }
             print("POST", chat_url, "(stream=%s)" % args.stream)
             if args.stream:
+                # Long read timeout: Cursor agent can take a long time before first output.
+                # Read timeout is per-chunk; no data within this time raises ReadTimeout.
+                stream_timeout = httpx.Timeout(300.0, connect=30.0)
                 with client.stream(
                     "POST",
                     chat_url,
                     json=body,
-                    timeout=60.0,
+                    timeout=stream_timeout,
                 ) as resp:
                     resp.raise_for_status()
                     print("Content:")

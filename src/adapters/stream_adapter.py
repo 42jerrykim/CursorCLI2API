@@ -1,10 +1,13 @@
 """Convert Cursor NDJSON events to OpenAI Chat Completions format."""
 import json
+import logging
 import time
 import uuid
 from typing import Any, AsyncIterator
 
 from src.cursor_runner import run_agent
+
+logger = logging.getLogger(__name__)
 
 
 OPENAI_MODEL_ID = "cursor-agent"
@@ -105,32 +108,51 @@ async def stream_completion(
     With stream_partial, each Cursor event is a delta; otherwise we send only new suffix.
     """
     prompt = _messages_to_prompt(messages)
+    t0 = time.monotonic()
+    logger.info("[stream_adapter] stream_completion start prompt_len=%d", len(prompt))
     accumulated = ""
+    event_count = 0
+    yield_count = 0
 
-    async for event in run_agent(
+    agent_gen = run_agent(
         prompt,
         stream_partial=stream_partial,
         force=force,
         cwd=cwd,
         timeout=timeout,
-    ):
-        text = _extract_assistant_text(event)
-        if text:
-            # Always send only the new suffix (delta). Cursor may send multiple
-            # events with the same or cumulative full text; we must not repeat.
-            if text.startswith(accumulated):
-                delta = text[len(accumulated) :]
-            elif accumulated and accumulated in text:
-                # Same content possibly with prefix (e.g. from different event type) - send only suffix after accumulated
-                pos = text.find(accumulated)
-                delta = text[pos + len(accumulated) :]
-            else:
-                delta = text
-            accumulated = text
-            if delta:
-                yield _openai_chunk(delta, finish_reason=None)
-        if event.get("type") == "result" and event.get("subtype") == "success":
-            yield _openai_chunk("", finish_reason="stop")
+    )
+    try:
+        async for event in agent_gen:
+            event_count += 1
+            ev_type = event.get("type", "")
+            if event_count <= 3 or ev_type in ("assistant", "result"):
+                logger.info("[stream_adapter] t=%.2fs event #%d type=%s", time.monotonic() - t0, event_count, ev_type)
+            text = _extract_assistant_text(event)
+            if text:
+                # Always send only the new suffix (delta). Cursor may send multiple
+                # events with the same or cumulative full text; we must not repeat.
+                if text.startswith(accumulated):
+                    delta = text[len(accumulated) :]
+                elif accumulated and accumulated in text:
+                    # Same content possibly with prefix (e.g. from different event type) - send only suffix after accumulated
+                    pos = text.find(accumulated)
+                    delta = text[pos + len(accumulated) :]
+                else:
+                    delta = text
+                accumulated = text
+                if delta:
+                    yield_count += 1
+                    if yield_count <= 5 or len(delta) > 50:
+                        logger.info("[stream_adapter] t=%.2fs yield #%d delta_len=%d", time.monotonic() - t0, yield_count, len(delta))
+                    yield _openai_chunk(delta, finish_reason=None)
+            if event.get("type") == "result" and event.get("subtype") == "success":
+                logger.info("[stream_adapter] t=%.2fs result success total_events=%d total_yields=%d", time.monotonic() - t0, event_count, yield_count)
+                yield _openai_chunk("", finish_reason="stop")
+                # Stop iterating so we can send [DONE] immediately. Agent often keeps stdout open;
+                # closing the generator kills the subprocess and lets the SSE stream finish.
+                break
+    finally:
+        await agent_gen.aclose()
 
 
 async def run_completion(
