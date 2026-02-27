@@ -120,6 +120,10 @@ async def stream_completion(
             # events with the same or cumulative full text; we must not repeat.
             if text.startswith(accumulated):
                 delta = text[len(accumulated) :]
+            elif accumulated and accumulated in text:
+                # Same content possibly with prefix (e.g. from different event type) - send only suffix after accumulated
+                pos = text.find(accumulated)
+                delta = text[pos + len(accumulated) :]
             else:
                 delta = text
             accumulated = text
@@ -142,7 +146,7 @@ async def run_completion(
     """
     prompt = _messages_to_prompt(messages)
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
-    full_content_parts = []
+    accumulated = ""
 
     async for event in run_agent(
         prompt,
@@ -153,7 +157,12 @@ async def run_completion(
     ):
         text = _extract_assistant_text(event)
         if text:
-            full_content_parts.append(text)
+            if text.startswith(accumulated):
+                accumulated = text
+            elif accumulated and accumulated in text:
+                accumulated = text
+            else:
+                accumulated = accumulated + text
 
-    full_content = "".join(full_content_parts)
+    full_content = accumulated
     return _openai_completion(full_content, completion_id)
