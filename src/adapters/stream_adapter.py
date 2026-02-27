@@ -116,15 +116,13 @@ async def stream_completion(
     ):
         text = _extract_assistant_text(event)
         if text:
-            if stream_partial:
-                delta = text
+            # Always send only the new suffix (delta). Cursor may send multiple
+            # events with the same or cumulative full text; we must not repeat.
+            if text.startswith(accumulated):
+                delta = text[len(accumulated) :]
             else:
-                # Cursor sends full message per event; send only new part
-                if text.startswith(accumulated):
-                    delta = text[len(accumulated) :]
-                else:
-                    delta = text
-                accumulated = text
+                delta = text
+            accumulated = text
             if delta:
                 yield _openai_chunk(delta, finish_reason=None)
         if event.get("type") == "result" and event.get("subtype") == "success":
