@@ -26,7 +26,11 @@ TAG_CURSOR_RUNNER = _code(35)    # magenta [cursor_runner]
 REQ_ID = _code(1, 36)            # bold cyan req_id=xxx
 PROMPT_PREVIEW = _code(33)       # yellow prompt_preview=...
 KEY_T = _code(2, 37)             # dim t=12.34s
-KEY_DONE = _code(1, 32)         # bold green done / result success
+KEY_DONE = _code(1, 32)          # bold green done / result success
+# Event type colors (cursor_runner stream-json)
+TYPE_THINKING = _code(36)        # cyan type=thinking
+TYPE_ASSISTANT = _code(32)        # green type=assistant
+TYPE_RESULT = _code(1, 35)       # bold magenta type=result
 
 
 def _color_level(levelno: int) -> str:
@@ -61,6 +65,10 @@ def _color_message(message: str) -> str:
     # "done" and "result success" -> bold green
     out = re.sub(r"\b(done)\b", f"{KEY_DONE}\\1{RESET}", out)
     out = re.sub(r"\b(result success)\b", f"{KEY_DONE}\\1{RESET}", out)
+    # type=thinking / type=assistant / type=result -> distinct colors
+    out = re.sub(r"(type=)(thinking)\b", rf"\1{TYPE_THINKING}\2{RESET}", out)
+    out = re.sub(r"(type=)(assistant)\b", rf"\1{TYPE_ASSISTANT}\2{RESET}", out)
+    out = re.sub(r"(type=)(result)\b", rf"\1{TYPE_RESULT}\2{RESET}", out)
     return out
 
 

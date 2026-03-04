@@ -178,14 +178,14 @@ async def run_agent(
                     obj = json.loads(line.decode("utf-8"))
                 except (json.JSONDecodeError, UnicodeDecodeError) as e:
                     continue  # skip malformed lines
-                if line_count <= 2 or obj.get("type") in ("assistant", "result"):
+                if line_count <= 2 or obj.get("type") in ("thinking", "assistant", "result"):
                     cfg = _get_config()
                     max_len = getattr(cfg, "LOG_CONTENT_MAX_LEN", 0)
                     preview = truncate_content_for_log(_content_preview_from_obj(obj), max_len) if max_len > 0 else ""
                     if preview:
-                        logger.debug("[cursor_runner] req_id=%s t=%.2fs line #%d type=%s content_preview=%s", req_id, asyncio.get_event_loop().time() - t0, line_count, obj.get("type", ""), preview)
+                        logger.info("[cursor_runner] req_id=%s t=%.2fs line #%d type=%s content_preview=%s", req_id, asyncio.get_event_loop().time() - t0, line_count, obj.get("type", ""), preview)
                     else:
-                        logger.debug("[cursor_runner] req_id=%s t=%.2fs line #%d type=%s", req_id, asyncio.get_event_loop().time() - t0, line_count, obj.get("type", ""))
+                        logger.info("[cursor_runner] req_id=%s t=%.2fs line #%d type=%s", req_id, asyncio.get_event_loop().time() - t0, line_count, obj.get("type", ""))
                 yield obj
 
         # drain remainder
