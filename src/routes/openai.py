@@ -89,6 +89,10 @@ async def create_chat_completion(body: dict) -> Any:
 
     # Optional: pass force from body if we add support later
     force = body.get("cursor_force") if "cursor_force" in body else None
+    # Optional: include Cursor thinking in content (default from config, typically True)
+    include_thinking = body.get("include_thinking") if "include_thinking" in body else None
+    if include_thinking is not None and not isinstance(include_thinking, bool):
+        include_thinking = bool(include_thinking)
 
     try:
         check_agent_available()
@@ -101,7 +105,7 @@ async def create_chat_completion(body: dict) -> Any:
         if stream:
             logger.info("req_id=%s stream start prompt_preview=%s", request_id, prompt_preview)
             return StreamingResponse(
-                _sse_stream(messages, request_id=request_id, prompt_preview=prompt_preview, force=force),
+                _sse_stream(messages, request_id=request_id, prompt_preview=prompt_preview, force=force, include_thinking=include_thinking),
                 media_type="text/event-stream",
                 headers={
                     "Cache-Control": "no-cache",
@@ -110,7 +114,7 @@ async def create_chat_completion(body: dict) -> Any:
                 },
             )
         logger.info("req_id=%s chat/completions request start prompt_preview=%s", request_id, prompt_preview)
-        result = await run_completion(messages, request_id=request_id, prompt_preview=prompt_preview, force=force)
+        result = await run_completion(messages, request_id=request_id, prompt_preview=prompt_preview, force=force, include_thinking=include_thinking)
         return result
     except TimeoutError as e:
         raise HTTPException(status_code=504, detail=str(e))
@@ -138,6 +142,7 @@ async def _sse_stream(
     request_id: str,
     prompt_preview: str = "",
     force: bool | None = None,
+    include_thinking: bool | None = None,
 ):
     """Generate SSE lines from stream_completion chunks. Sends SSE keepalive comments
     while waiting for the agent so clients with a per-read timeout don't disconnect."""
@@ -149,7 +154,7 @@ async def _sse_stream(
     async def consume():
         try:
             async for chunk in stream_completion(
-                messages, request_id=request_id, prompt_preview=prompt_preview, force=force
+                messages, request_id=request_id, prompt_preview=prompt_preview, force=force, include_thinking=include_thinking
             ):
                 await queue.put(("chunk", chunk))
             await queue.put(("done", None))

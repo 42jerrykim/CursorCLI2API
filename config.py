@@ -27,6 +27,9 @@ REQUEST_TIMEOUT: float | None = (
 # Enable --force for agent (allow file modifications). Default True; set CURSOR_AGENT_FORCE=false to disable.
 AGENT_FORCE: bool = os.getenv("CURSOR_AGENT_FORCE", "true").lower() not in ("0", "false", "no")
 
+# Include Cursor "thinking" in streamed/final content (before assistant reply). Default True.
+INCLUDE_THINKING: bool = os.getenv("INCLUDE_THINKING", "true").lower() not in ("0", "false", "no")
+
 # Max length of Cursor output content to include in logs (0 = do not log content).
 LOG_CONTENT_MAX_LEN: int = max(0, int(os.getenv("LOG_CONTENT_MAX_LEN", "200")))
 

@@ -105,19 +105,25 @@ async def stream_completion(
     force: bool | None = None,
     cwd: str | None = None,
     timeout: float | None = None,
+    include_thinking: bool | None = None,
 ) -> AsyncIterator[dict]:
     """
     Run agent and yield OpenAI-format stream chunks (for SSE).
     Each yielded dict should be serialized as JSON and sent as SSE data.
     With stream_partial, each Cursor event is a delta; otherwise we send only new suffix.
+    When include_thinking is True (default), thinking is sent first in delta.content
+    as "<thinking>...</thinking>\\n\\n" then the assistant reply, so TUI shows both without code changes.
     """
     req_id = request_id or ""
+    if include_thinking is None:
+        include_thinking = getattr(config, "INCLUDE_THINKING", True)
     prompt = _messages_to_prompt(messages)
     t0 = time.monotonic()
-    logger.info("[stream_adapter] req_id=%s stream_completion start prompt_len=%d prompt_preview=%s", req_id, len(prompt), prompt_preview)
+    logger.info("[stream_adapter] req_id=%s stream_completion start prompt_len=%d prompt_preview=%s include_thinking=%s", req_id, len(prompt), prompt_preview, include_thinking)
     accumulated = ""
     event_count = 0
     yield_count = 0
+    thinking_emitted = False
 
     agent_gen = run_agent(
         prompt,
@@ -132,14 +138,35 @@ async def stream_completion(
         async for event in agent_gen:
             event_count += 1
             ev_type = event.get("type", "")
-            if event_count <= 3 or ev_type in ("assistant", "result"):
+            subtype = event.get("subtype", "")
+
+            if event_count <= 3 or ev_type in ("assistant", "result", "thinking"):
                 preview = ""
                 if config.LOG_CONTENT_MAX_LEN > 0 and ev_type in ("assistant", "result"):
                     preview = truncate_content_for_log(_extract_assistant_text(event), config.LOG_CONTENT_MAX_LEN)
+                elif ev_type == "thinking" and subtype == "delta":
+                    preview = truncate_content_for_log(event.get("text") or "", config.LOG_CONTENT_MAX_LEN) if config.LOG_CONTENT_MAX_LEN > 0 else ""
                 if preview:
                     logger.debug("[stream_adapter] req_id=%s t=%.2fs event #%d type=%s content_preview=%s", req_id, time.monotonic() - t0, event_count, ev_type, preview)
                 else:
                     logger.debug("[stream_adapter] req_id=%s t=%.2fs event #%d type=%s", req_id, time.monotonic() - t0, event_count, ev_type)
+
+            # Emit thinking into delta.content so TUI shows it without code changes
+            if ev_type == "thinking" and include_thinking:
+                if subtype == "delta":
+                    if not thinking_emitted:
+                        yield_count += 1
+                        yield _openai_chunk("<thinking>", finish_reason=None)
+                        thinking_emitted = True
+                    text = event.get("text") or ""
+                    if text:
+                        yield_count += 1
+                        yield _openai_chunk(text, finish_reason=None)
+                elif subtype == "completed":
+                    yield_count += 1
+                    yield _openai_chunk("</thinking>\n\n", finish_reason=None)
+
+            # Assistant/result: existing delta logic (reply follows after </thinking>)
             text = _extract_assistant_text(event)
             if text:
                 # Always send only the new suffix (delta). Cursor may send multiple
@@ -147,7 +174,6 @@ async def stream_completion(
                 if text.startswith(accumulated):
                     delta = text[len(accumulated) :]
                 elif accumulated and accumulated in text:
-                    # Same content possibly with prefix (e.g. from different event type) - send only suffix after accumulated
                     pos = text.find(accumulated)
                     delta = text[pos + len(accumulated) :]
                 else:
@@ -167,11 +193,16 @@ async def stream_completion(
             if event.get("type") == "result" and event.get("subtype") == "success":
                 logger.info("[stream_adapter] req_id=%s t=%.2fs result success total_events=%d total_yields=%d", req_id, time.monotonic() - t0, event_count, yield_count)
                 yield _openai_chunk("", finish_reason="stop")
-                # Stop iterating so we can send [DONE] immediately. Agent often keeps stdout open;
-                # closing the generator kills the subprocess and lets the SSE stream finish.
                 break
     finally:
         await agent_gen.aclose()
+
+
+def _extract_thinking_text(event: dict) -> str:
+    """Extract thinking delta text from Cursor thinking event."""
+    if event.get("type") == "thinking" and event.get("subtype") == "delta":
+        return event.get("text") or ""
+    return ""
 
 
 async def run_completion(
@@ -183,13 +214,18 @@ async def run_completion(
     force: bool | None = None,
     cwd: str | None = None,
     timeout: float | None = None,
+    include_thinking: bool | None = None,
 ) -> dict:
     """
     Run agent and return a single OpenAI-format ChatCompletion (non-streaming).
+    When include_thinking is True (default), full content includes [Thinking]...\\n\\n[Reply]... reply.
     """
+    if include_thinking is None:
+        include_thinking = getattr(config, "INCLUDE_THINKING", True)
     prompt = _messages_to_prompt(messages)
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
-    accumulated = ""
+    accumulated_reply = ""
+    thinking_parts: list[str] = []
 
     async for event in run_agent(
         prompt,
@@ -200,14 +236,20 @@ async def run_completion(
         cwd=cwd,
         timeout=timeout,
     ):
+        ev_type = event.get("type", "")
+        if ev_type == "thinking" and include_thinking and event.get("subtype") == "delta":
+            thinking_parts.append(_extract_thinking_text(event))
         text = _extract_assistant_text(event)
         if text:
-            if text.startswith(accumulated):
-                accumulated = text
-            elif accumulated and accumulated in text:
-                accumulated = text
+            if text.startswith(accumulated_reply):
+                accumulated_reply = text
+            elif accumulated_reply and accumulated_reply in text:
+                accumulated_reply = text
             else:
-                accumulated = accumulated + text
+                accumulated_reply = accumulated_reply + text
 
-    full_content = accumulated
+    if include_thinking and thinking_parts:
+        full_content = "<thinking>" + "".join(thinking_parts) + "</thinking>\n\n" + accumulated_reply
+    else:
+        full_content = accumulated_reply
     return _openai_completion(full_content, completion_id)

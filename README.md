@@ -24,6 +24,7 @@ pip install -r requirements.txt
 - `CURSOR_AGENT_CWD`: agent 작업 디렉터리 (비워두면 서버 cwd). **첫 응답이 느릴 때**: 서버를 프로젝트 폴더에서 실행하면 agent가 해당 프로젝트를 인덱싱해 30초 이상 걸릴 수 있음. 프로젝트 컨텍스트가 필요 없으면 `CURSOR_AGENT_CWD=$HOME` 등으로 설정하면 터미널에서 직접 실행할 때처럼 빠르게 응답함.
 - `REQUEST_TIMEOUT`: 요청 타임아웃(초), 비우면 무제한
 - `CURSOR_AGENT_FORCE`: agent에 `--force` 전달 여부 (기본 `true`, `false`로 끄기)
+- `INCLUDE_THINKING`: 스트리밍/비스트리밍 응답에 Cursor "thinking" 내용을 답변 앞에 포함 여부 (기본 `true`). `false`로 끄면 답변만 반환.
 
 ## 실행
 
@@ -78,6 +79,7 @@ Hello. How can I help you today with your CursorCLI2API project or anything else
   - `messages`: 필수. `[{ "role": "user", "content": "..." }]` 형태.
   - `stream`: `true` 이면 SSE 스트리밍, `false` 이면 단일 JSON 응답.
   - `model`: 무시됨 (항상 Cursor agent 사용).
+  - `include_thinking`: (선택) `true`/`false`. 기본값은 서버 설정(`INCLUDE_THINKING`). `true`이면 스트리밍 시 `delta.content`에 `<thinking>...</thinking>\n\n` 뒤에 답변이 이어져, 클라이언트가 그대로 표시하면 thinking과 답변이 모두 보임.
 
 ### 예: 비스트리밍
 
