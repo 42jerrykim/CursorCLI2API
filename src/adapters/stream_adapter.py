@@ -5,7 +5,9 @@ import time
 import uuid
 from typing import Any, AsyncIterator
 
+import config
 from src.cursor_runner import run_agent
+from src.utils.log_helpers import truncate_content_for_log
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +99,8 @@ def _openai_completion(full_content: str, completion_id: str) -> dict:
 async def stream_completion(
     messages: list[dict],
     *,
+    request_id: str | None = None,
+    prompt_preview: str = "",
     stream_partial: bool = True,
     force: bool | None = None,
     cwd: str | None = None,
@@ -107,15 +111,18 @@ async def stream_completion(
     Each yielded dict should be serialized as JSON and sent as SSE data.
     With stream_partial, each Cursor event is a delta; otherwise we send only new suffix.
     """
+    req_id = request_id or ""
     prompt = _messages_to_prompt(messages)
     t0 = time.monotonic()
-    logger.info("[stream_adapter] stream_completion start prompt_len=%d", len(prompt))
+    logger.info("[stream_adapter] req_id=%s stream_completion start prompt_len=%d prompt_preview=%s", req_id, len(prompt), prompt_preview)
     accumulated = ""
     event_count = 0
     yield_count = 0
 
     agent_gen = run_agent(
         prompt,
+        request_id=request_id,
+        prompt_preview=prompt_preview,
         stream_partial=stream_partial,
         force=force,
         cwd=cwd,
@@ -126,7 +133,13 @@ async def stream_completion(
             event_count += 1
             ev_type = event.get("type", "")
             if event_count <= 3 or ev_type in ("assistant", "result"):
-                logger.info("[stream_adapter] t=%.2fs event #%d type=%s", time.monotonic() - t0, event_count, ev_type)
+                preview = ""
+                if config.LOG_CONTENT_MAX_LEN > 0 and ev_type in ("assistant", "result"):
+                    preview = truncate_content_for_log(_extract_assistant_text(event), config.LOG_CONTENT_MAX_LEN)
+                if preview:
+                    logger.debug("[stream_adapter] req_id=%s t=%.2fs event #%d type=%s content_preview=%s", req_id, time.monotonic() - t0, event_count, ev_type, preview)
+                else:
+                    logger.debug("[stream_adapter] req_id=%s t=%.2fs event #%d type=%s", req_id, time.monotonic() - t0, event_count, ev_type)
             text = _extract_assistant_text(event)
             if text:
                 # Always send only the new suffix (delta). Cursor may send multiple
@@ -142,11 +155,17 @@ async def stream_completion(
                 accumulated = text
                 if delta:
                     yield_count += 1
-                    if yield_count <= 5 or len(delta) > 50:
-                        logger.info("[stream_adapter] t=%.2fs yield #%d delta_len=%d", time.monotonic() - t0, yield_count, len(delta))
+                    if config.LOG_CONTENT_MAX_LEN > 0:
+                        content_preview = truncate_content_for_log(delta, config.LOG_CONTENT_MAX_LEN)
+                        if content_preview:
+                            logger.debug("[stream_adapter] req_id=%s t=%.2fs yield #%d delta_len=%d content=%s", req_id, time.monotonic() - t0, yield_count, len(delta), content_preview)
+                        else:
+                            logger.debug("[stream_adapter] req_id=%s t=%.2fs yield #%d delta_len=%d", req_id, time.monotonic() - t0, yield_count, len(delta))
+                    else:
+                        logger.debug("[stream_adapter] req_id=%s t=%.2fs yield #%d delta_len=%d", req_id, time.monotonic() - t0, yield_count, len(delta))
                     yield _openai_chunk(delta, finish_reason=None)
             if event.get("type") == "result" and event.get("subtype") == "success":
-                logger.info("[stream_adapter] t=%.2fs result success total_events=%d total_yields=%d", time.monotonic() - t0, event_count, yield_count)
+                logger.info("[stream_adapter] req_id=%s t=%.2fs result success total_events=%d total_yields=%d", req_id, time.monotonic() - t0, event_count, yield_count)
                 yield _openai_chunk("", finish_reason="stop")
                 # Stop iterating so we can send [DONE] immediately. Agent often keeps stdout open;
                 # closing the generator kills the subprocess and lets the SSE stream finish.
@@ -158,6 +177,8 @@ async def stream_completion(
 async def run_completion(
     messages: list[dict],
     *,
+    request_id: str | None = None,
+    prompt_preview: str = "",
     stream_partial: bool = True,
     force: bool | None = None,
     cwd: str | None = None,
@@ -172,6 +193,8 @@ async def run_completion(
 
     async for event in run_agent(
         prompt,
+        request_id=request_id,
+        prompt_preview=prompt_preview,
         stream_partial=stream_partial,
         force=force,
         cwd=cwd,

@@ -8,6 +8,8 @@ import sys
 from pathlib import Path
 from typing import AsyncIterator
 
+from src.utils.log_helpers import truncate_content_for_log
+
 logger = logging.getLogger(__name__)
 
 # Optional config (avoid circular import by lazy use in run_agent)
@@ -36,6 +38,29 @@ def _resolve_agent_path(cmd: str) -> str:
     return cmd
 
 
+def _content_preview_from_obj(obj: dict) -> str:
+    """Extract a single string from Cursor NDJSON event for log preview."""
+    ev_type = obj.get("type", "")
+    if ev_type == "assistant":
+        msg = obj.get("message") or {}
+        parts = []
+        for part in msg.get("content") or []:
+            if part.get("type") == "text" and "text" in part:
+                parts.append(part["text"] or "")
+        return "".join(parts)
+    if ev_type == "result":
+        return obj.get("result") or ""
+    if isinstance(obj.get("text"), str):
+        return obj["text"]
+    if isinstance(obj.get("content"), str):
+        return obj["content"]
+    if isinstance(obj.get("content"), list):
+        for item in obj["content"]:
+            if isinstance(item, dict) and item.get("type") == "text" and "text" in item:
+                return item["text"] or ""
+    return ""
+
+
 def check_agent_available() -> None:
     """Raise RuntimeError if the configured agent command is not found."""
     cfg = _get_config()
@@ -60,6 +85,8 @@ def check_agent_available() -> None:
 async def run_agent(
     prompt: str,
     *,
+    request_id: str | None = None,
+    prompt_preview: str = "",
     stream_partial: bool = True,
     force: bool | None = None,
     cwd: str | None = None,
@@ -69,6 +96,7 @@ async def run_agent(
     Run `agent -p --output-format stream-json [--stream-partial-output] "<prompt>"`
     and yield each NDJSON line as a parsed dict.
     """
+    req_id = request_id or ""
     cfg = _get_config()
     cmd = _resolve_agent_path(cfg.AGENT_CMD)
     force = force if force is not None else cfg.AGENT_FORCE
@@ -90,9 +118,10 @@ async def run_agent(
     run_cwd = cwd or os.getcwd()
     t0 = asyncio.get_event_loop().time()
     logger.info(
-        "[cursor_runner] spawning agent cwd=%s args=%s",
+        "[cursor_runner] req_id=%s spawning agent cwd=%s prompt_preview=%s",
+        req_id,
         run_cwd,
-        args[:4] + ["..."] if len(args) > 4 else args,
+        prompt_preview,
     )
 
     try:
@@ -102,7 +131,7 @@ async def run_agent(
             stderr=asyncio.subprocess.PIPE,
             cwd=run_cwd,
         )
-        logger.info("[cursor_runner] subprocess started pid=%s", proc.pid)
+        logger.info("[cursor_runner] req_id=%s subprocess started pid=%s", req_id, proc.pid)
     except FileNotFoundError:
         raise RuntimeError(
             f'Cursor agent "{cmd}" not found. '
@@ -136,7 +165,7 @@ async def run_agent(
                 break
             if first_chunk:
                 elapsed = asyncio.get_event_loop().time() - t0
-                logger.info("[cursor_runner] t=%.2fs first stdout chunk received len=%d", elapsed, len(chunk))
+                logger.info("[cursor_runner] req_id=%s t=%.2fs first stdout chunk received len=%d", req_id, elapsed, len(chunk))
                 first_chunk = False
             buffer += chunk
             while b"\n" in buffer:
@@ -150,7 +179,13 @@ async def run_agent(
                 except (json.JSONDecodeError, UnicodeDecodeError) as e:
                     continue  # skip malformed lines
                 if line_count <= 2 or obj.get("type") in ("assistant", "result"):
-                    logger.info("[cursor_runner] t=%.2fs line #%d type=%s", asyncio.get_event_loop().time() - t0, line_count, obj.get("type", ""))
+                    cfg = _get_config()
+                    max_len = getattr(cfg, "LOG_CONTENT_MAX_LEN", 0)
+                    preview = truncate_content_for_log(_content_preview_from_obj(obj), max_len) if max_len > 0 else ""
+                    if preview:
+                        logger.debug("[cursor_runner] req_id=%s t=%.2fs line #%d type=%s content_preview=%s", req_id, asyncio.get_event_loop().time() - t0, line_count, obj.get("type", ""), preview)
+                    else:
+                        logger.debug("[cursor_runner] req_id=%s t=%.2fs line #%d type=%s", req_id, asyncio.get_event_loop().time() - t0, line_count, obj.get("type", ""))
                 yield obj
 
         # drain remainder
@@ -169,7 +204,7 @@ async def run_agent(
             await proc.wait()
 
     elapsed = asyncio.get_event_loop().time() - t0
-    logger.info("[cursor_runner] t=%.2fs process exited returncode=%s lines_parsed=%d", elapsed, proc.returncode, line_count)
+    logger.info("[cursor_runner] req_id=%s t=%.2fs process exited returncode=%s lines_parsed=%d", req_id, elapsed, proc.returncode, line_count)
     if proc.returncode != 0:
         err = await read_stderr()
         raise RuntimeError(f"agent exited with code {proc.returncode}. stderr: {err}")

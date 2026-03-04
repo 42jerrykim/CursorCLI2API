@@ -1,18 +1,36 @@
 """FastAPI app: OpenAI-compatible API over Cursor CLI."""
 import logging
+import sys
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-# Show INFO logs from src (routes, stream_adapter, cursor_runner) for debugging stream timing
-logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
-logging.getLogger("src").setLevel(logging.INFO)
+# Import config so env is loaded when app starts
+import config  # noqa: F401
+
+log_level = getattr(logging, config.LOG_LEVEL, logging.INFO)
+use_color = (
+    False
+    if config.LOG_COLOR in ("0", "false", "no")
+    else True
+    if config.LOG_COLOR in ("1", "true", "yes")
+    else sys.stdout.isatty()
+)
+if use_color:
+    from src.utils.colored_log_formatter import ColoredLogFormatter
+
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(
+        ColoredLogFormatter(use_color=True, fmt="%(levelname)s %(name)s %(message)s")
+    )
+    logging.basicConfig(level=log_level, handlers=[handler])
+else:
+    logging.basicConfig(level=log_level, format="%(levelname)s %(name)s %(message)s")
+logging.getLogger("src").setLevel(log_level)
+
 from fastapi.middleware.cors import CORSMiddleware
 
 from src.routes.openai import router as openai_router
-
-# Import config so env is loaded when app starts
-import config  # noqa: F401
 
 
 @asynccontextmanager

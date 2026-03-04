@@ -9,14 +9,16 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 
-logger = logging.getLogger(__name__)
-
+import config
 from src.adapters.stream_adapter import (
     OPENAI_MODEL_ID,
     run_completion,
     stream_completion,
 )
 from src.cursor_runner import check_agent_available
+from src.utils.log_helpers import truncate_content_for_log
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1", tags=["openai"])
 
@@ -51,6 +53,30 @@ def _parse_messages(body: dict) -> list[dict]:
     return messages
 
 
+PROMPT_PREVIEW_LEN = 80
+
+
+def _prompt_preview_from_messages(messages: list[dict]) -> str:
+    """First user-visible content from messages, single line, truncated for logs."""
+    if not messages:
+        return ""
+    first = messages[0]
+    content = first.get("content")
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        text = content
+    elif isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                parts.append(block.get("text") or "")
+        text = " ".join(parts)
+    else:
+        text = str(content)
+    return truncate_content_for_log(text.strip(), PROMPT_PREVIEW_LEN)
+
+
 @router.post("/chat/completions")
 async def create_chat_completion(body: dict) -> Any:
     """
@@ -70,11 +96,12 @@ async def create_chat_completion(body: dict) -> Any:
         raise HTTPException(status_code=502, detail=str(e))
 
     try:
+        request_id = uuid.uuid4().hex[:8]
+        prompt_preview = _prompt_preview_from_messages(messages)
         if stream:
-            prompt_preview = (messages[0].get("content") or "")[:80] if messages else ""
-            logger.info("chat/completions stream request start prompt=%r", prompt_preview)
+            logger.info("req_id=%s stream start prompt_preview=%s", request_id, prompt_preview)
             return StreamingResponse(
-                _sse_stream(messages, force=force),
+                _sse_stream(messages, request_id=request_id, prompt_preview=prompt_preview, force=force),
                 media_type="text/event-stream",
                 headers={
                     "Cache-Control": "no-cache",
@@ -82,7 +109,8 @@ async def create_chat_completion(body: dict) -> Any:
                     "X-Accel-Buffering": "no",
                 },
             )
-        result = await run_completion(messages, force=force)
+        logger.info("req_id=%s chat/completions request start prompt_preview=%s", request_id, prompt_preview)
+        result = await run_completion(messages, request_id=request_id, prompt_preview=prompt_preview, force=force)
         return result
     except TimeoutError as e:
         raise HTTPException(status_code=504, detail=str(e))
@@ -104,17 +132,25 @@ def _empty_delta_chunk():
 SSE_KEEPALIVE_INTERVAL = 20.0  # seconds; send comment so client read timeout doesn't fire
 
 
-async def _sse_stream(messages: list[dict], force: bool | None = None):
+async def _sse_stream(
+    messages: list[dict],
+    *,
+    request_id: str,
+    prompt_preview: str = "",
+    force: bool | None = None,
+):
     """Generate SSE lines from stream_completion chunks. Sends SSE keepalive comments
     while waiting for the agent so clients with a per-read timeout don't disconnect."""
     t0 = time.monotonic()
-    logger.info("[stream] t=%.2fs sending empty-delta (stream start)", time.monotonic() - t0)
+    logger.info("[stream] req_id=%s t=%.2fs sending empty-delta (stream start)", request_id, time.monotonic() - t0)
     yield f"data: {json.dumps(_empty_delta_chunk(), ensure_ascii=False)}\n\n"
     queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
 
     async def consume():
         try:
-            async for chunk in stream_completion(messages, force=force):
+            async for chunk in stream_completion(
+                messages, request_id=request_id, prompt_preview=prompt_preview, force=force
+            ):
                 await queue.put(("chunk", chunk))
             await queue.put(("done", None))
         except (RuntimeError, TimeoutError) as e:
@@ -127,22 +163,27 @@ async def _sse_stream(messages: list[dict], force: bool | None = None):
             kind, payload = await asyncio.wait_for(queue.get(), timeout=SSE_KEEPALIVE_INTERVAL)
         except asyncio.TimeoutError:
             elapsed = time.monotonic() - t0
-            logger.info("[stream] t=%.2fs keepalive (no agent output yet)", elapsed)
+            logger.info("[stream] req_id=%s t=%.2fs keepalive (no agent output yet)", request_id, elapsed)
             yield ": keepalive\n\n"
             continue
         if kind == "done":
             break
         if kind == "error":
             elapsed = time.monotonic() - t0
-            logger.warning("[stream] t=%.2fs error: %s", elapsed, payload)
+            logger.warning("[stream] req_id=%s t=%.2fs error: %s", request_id, elapsed, payload)
             yield f"data: {json.dumps({'error': {'message': str(payload)}, 'object': 'error'}, ensure_ascii=False)}\n\n"
             return
         chunk_count += 1
-        delta_len = len((payload.get("choices") or [{}])[0].get("delta", {}).get("content") or "")
+        delta_content = (payload.get("choices") or [{}])[0].get("delta", {}).get("content") or ""
+        delta_len = len(delta_content)
         elapsed = time.monotonic() - t0
-        logger.info("[stream] t=%.2fs chunk #%d delta_len=%d", elapsed, chunk_count, delta_len)
+        content_preview = truncate_content_for_log(delta_content, config.LOG_CONTENT_MAX_LEN) if config.LOG_CONTENT_MAX_LEN > 0 else ""
+        if content_preview:
+            logger.debug("[stream] req_id=%s t=%.2fs chunk #%d delta_len=%d content=%s", request_id, elapsed, chunk_count, delta_len, content_preview)
+        else:
+            logger.debug("[stream] req_id=%s t=%.2fs chunk #%d delta_len=%d", request_id, elapsed, chunk_count, delta_len)
         line = json.dumps(payload, ensure_ascii=False)
         yield f"data: {line}\n\n"
     elapsed = time.monotonic() - t0
-    logger.info("[stream] t=%.2fs done total_chunks=%d", elapsed, chunk_count)
+    logger.info("[stream] req_id=%s t=%.2fs done total_chunks=%d", request_id, elapsed, chunk_count)
     yield "data: [DONE]\n\n"

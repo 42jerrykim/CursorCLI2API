@@ -23,7 +23,7 @@ pip install -r requirements.txt
 - `CURSOR_AGENT_CMD`: agent 실행 파일 이름/경로 (기본 `agent`)
 - `CURSOR_AGENT_CWD`: agent 작업 디렉터리 (비워두면 서버 cwd). **첫 응답이 느릴 때**: 서버를 프로젝트 폴더에서 실행하면 agent가 해당 프로젝트를 인덱싱해 30초 이상 걸릴 수 있음. 프로젝트 컨텍스트가 필요 없으면 `CURSOR_AGENT_CWD=$HOME` 등으로 설정하면 터미널에서 직접 실행할 때처럼 빠르게 응답함.
 - `REQUEST_TIMEOUT`: 요청 타임아웃(초), 비우면 무제한
-- `CURSOR_AGENT_FORCE`: `true` 로 설정 시 agent에 `--force` 전달 (파일 수정 허용)
+- `CURSOR_AGENT_FORCE`: agent에 `--force` 전달 여부 (기본 `true`, `false`로 끄기)
 
 ## 실행
 
